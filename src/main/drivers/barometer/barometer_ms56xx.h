@@ -20,7 +20,9 @@
 
 #pragma once
 
-// MS5611, Standard address 0x77
-#define MS5611_I2C_ADDR                 0x77
+// MS56xx, Standard address 0x77
+#define MS56XX_I2C_ADDR                 0x77
 
-bool ms5611Detect(baroDev_t *baro);
+#include "sensors/barometer.h" // for baroSensor_e enum
+
+bool ms56xxDetect(baro_t *baro, baroSensor_e type);

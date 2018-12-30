@@ -23,12 +23,13 @@
 
 #include "platform.h"
 
-#if defined(USE_BARO) && (defined(USE_BARO_MS5611) || defined(USE_BARO_SPI_MS5611))
+#if defined(USE_BARO) && (defined(USE_BARO_MS5611) || defined(USE_BARO_SPI_MS5611) || defined(USE_BARO_MS5607) || defined(USE_BARO_SPI_MS5607))
 
 #include "build/build_config.h"
 
 #include "barometer.h"
-#include "barometer_ms5611.h"
+#include "sensors/barometer.h"
+#include "barometer_ms56xx.h"
 
 #include "drivers/bus_i2c.h"
 #include "drivers/bus_i2c_busdev.h"
@@ -49,24 +50,26 @@
 #define CMD_PROM_RD             0xA0 // Prom read command
 #define PROM_NB                 8
 
-static void ms5611_reset(busDevice_t *busdev);
-static uint16_t ms5611_prom(busDevice_t *busdev, int8_t coef_num);
-STATIC_UNIT_TESTED int8_t ms5611_crc(uint16_t *prom);
-static uint32_t ms5611_read_adc(busDevice_t *busdev);
-static void ms5611_start_ut(baroDev_t *baro);
-static void ms5611_get_ut(baroDev_t *baro);
-static void ms5611_start_up(baroDev_t *baro);
-static void ms5611_get_up(baroDev_t *baro);
+static void ms56xx_reset(busDevice_t *busdev);
+static uint16_t ms56xx_prom(busDevice_t *busdev, int8_t coef_num);
+STATIC_UNIT_TESTED int8_t ms56xx_crc(uint16_t *prom);
+static uint32_t ms56xx_read_adc(busDevice_t *busdev);
+static void ms56xx_start_ut(baroDev_t *baro);
+static void ms56xx_get_ut(baroDev_t *baro);
+static void ms56xx_start_up(baroDev_t *baro);
+static void ms56xx_get_up(baroDev_t *baro);
+STATIC_UNIT_TESTED void ms5607_calculate(int32_t *pressure, int32_t *temperature);
 STATIC_UNIT_TESTED void ms5611_calculate(int32_t *pressure, int32_t *temperature);
 
-STATIC_UNIT_TESTED uint32_t ms5611_ut;  // static result of temperature measurement
-STATIC_UNIT_TESTED uint32_t ms5611_up;  // static result of pressure measurement
-STATIC_UNIT_TESTED uint16_t ms5611_c[PROM_NB];  // on-chip ROM
-static uint8_t ms5611_osr = CMD_ADC_4096;
 
-void ms5611BusInit(busDevice_t *busdev)
+STATIC_UNIT_TESTED uint32_t ms56xx_ut;  // static result of temperature measurement
+STATIC_UNIT_TESTED uint32_t ms56xx_up;  // static result of pressure measurement
+STATIC_UNIT_TESTED uint16_t ms56xx_c[PROM_NB];  // on-chip ROM
+static uint8_t ms56xx_osr = CMD_ADC_4096;
+
+void ms56xxBusInit(busDevice_t *busdev)
 {
-#ifdef USE_BARO_SPI_MS5611
+#if defined(USE_BARO_SPI_MS5611) || defined(USE_BARO_SPI_MS5607)
     if (busdev->bustype == BUSTYPE_SPI) {
         IOHi(busdev->busdev_u.spi.csnPin); // Disable
         IOInit(busdev->busdev_u.spi.csnPin, OWNER_BARO_CS, 0);
@@ -78,9 +81,9 @@ void ms5611BusInit(busDevice_t *busdev)
 #endif
 }
 
-void ms5611BusDeinit(busDevice_t *busdev)
+void ms56xxBusDeinit(busDevice_t *busdev)
 {
-#ifdef USE_BARO_SPI_MS5611
+#if defined(USE_BARO_SPI_MS5611) || defined(USE_BARO_SPI_MS5607)
     if (busdev->bustype == BUSTYPE_SPI) {
         spiPreinitCsByIO(busdev->busdev_u.spi.csnPin);
     }
@@ -89,7 +92,7 @@ void ms5611BusDeinit(busDevice_t *busdev)
 #endif
 }
 
-bool ms5611Detect(baroDev_t *baro)
+bool ms56xxDetect(baro_t *baro, baroSensor_e type)
 {
     uint8_t sig;
     int i;
@@ -99,11 +102,11 @@ bool ms5611Detect(baroDev_t *baro)
 
     busDevice_t *busdev = &baro->busdev;
 
-    ms5611BusInit(busdev);
+    ms56xxBusInit(busdev);
 
     if ((busdev->bustype == BUSTYPE_I2C) && (busdev->busdev_u.i2c.address == 0)) {
-        // Default address for MS5611
-        busdev->busdev_u.i2c.address = MS5611_I2C_ADDR;
+        // Default address for MS56xx
+        busdev->busdev_u.i2c.address = MS56XX_I2C_ADDR;
         defaultAddressApplied = true;
     }
 
@@ -111,30 +114,35 @@ bool ms5611Detect(baroDev_t *baro)
         goto fail;
     }
 
-    ms5611_reset(busdev);
+    ms56xx_reset(busdev);
 
     // read all coefficients
     for (i = 0; i < PROM_NB; i++)
-        ms5611_c[i] = ms5611_prom(busdev, i);
+        ms56xx_c[i] = ms56xx_prom(busdev, i);
 
     // check crc, bail out if wrong - we are probably talking to BMP085 w/o XCLR line!
-    if (ms5611_crc(ms5611_c) != 0) {
+    if (ms56xx_crc(ms56xx_c) != 0) {
         goto fail;
     }
 
     // TODO prom + CRC
     baro->ut_delay = 10000;
     baro->up_delay = 10000;
-    baro->start_ut = ms5611_start_ut;
-    baro->get_ut = ms5611_get_ut;
-    baro->start_up = ms5611_start_up;
-    baro->get_up = ms5611_get_up;
-    baro->calculate = ms5611_calculate;
+    baro->start_ut = ms56xx_start_ut;
+    baro->get_ut = ms56xx_get_ut;
+    baro->start_up = ms56xx_start_up;
+    baro->get_up = ms56xx_get_up;
+    if (type == BARO_MS5607) {
+        baro->calculate = ms5607_calculate;
+    } else { // default to MS5611
+        baro->calculate = ms5611_calculate;
+    }
+
 
     return true;
 
 fail:;
-    ms5611BusDeinit(busdev);
+    ms56xxBusDeinit(busdev);
 
     if (defaultAddressApplied) {
         busdev->busdev_u.i2c.address = 0;
@@ -143,14 +151,14 @@ fail:;
     return false;
 }
 
-static void ms5611_reset(busDevice_t *busdev)
+static void ms56xx_reset(busDevice_t *busdev)
 {
     busWriteRegister(busdev, CMD_RESET, 1);
 
     delayMicroseconds(2800);
 }
 
-static uint16_t ms5611_prom(busDevice_t *busdev, int8_t coef_num)
+static uint16_t ms56xx_prom(busDevice_t *busdev, int8_t coef_num)
 {
     uint8_t rxbuf[2] = { 0, 0 };
 
@@ -159,7 +167,7 @@ static uint16_t ms5611_prom(busDevice_t *busdev, int8_t coef_num)
     return rxbuf[0] << 8 | rxbuf[1];
 }
 
-STATIC_UNIT_TESTED int8_t ms5611_crc(uint16_t *prom)
+STATIC_UNIT_TESTED int8_t ms56xx_crc(uint16_t *prom)
 {
     int32_t i, j;
     uint32_t res = 0;
@@ -189,7 +197,7 @@ STATIC_UNIT_TESTED int8_t ms5611_crc(uint16_t *prom)
     return -1;
 }
 
-static uint32_t ms5611_read_adc(busDevice_t *busdev)
+static uint32_t ms56xx_read_adc(busDevice_t *busdev)
 {
     uint8_t rxbuf[3];
 
@@ -198,24 +206,24 @@ static uint32_t ms5611_read_adc(busDevice_t *busdev)
     return (rxbuf[0] << 16) | (rxbuf[1] << 8) | rxbuf[2];
 }
 
-static void ms5611_start_ut(baroDev_t *baro)
+static void ms56xx_start_ut(baroDev_t *baro)
 {
-    busWriteRegister(&baro->busdev, CMD_ADC_CONV + CMD_ADC_D2 + ms5611_osr, 1); // D2 (temperature) conversion start!
+    busWriteRegister(&baro->busdev, CMD_ADC_CONV + CMD_ADC_D2 + ms56xx_osr, 1); // D2 (temperature) conversion start!
 }
 
-static void ms5611_get_ut(baroDev_t *baro)
+static void ms56xx_get_ut(baroDev_t *baro)
 {
-    ms5611_ut = ms5611_read_adc(&baro->busdev);
+    ms56xx_ut = ms56xx_read_adc(&baro->busdev);
 }
 
-static void ms5611_start_up(baroDev_t *baro)
+static void ms56xx_start_up(baroDev_t *baro)
 {
-    busWriteRegister(&baro->busdev, CMD_ADC_CONV + CMD_ADC_D1 + ms5611_osr, 1); // D1 (pressure) conversion start!
+    busWriteRegister(&baro->busdev, CMD_ADC_CONV + CMD_ADC_D1 + ms56xx_osr, 1); // D1 (pressure) conversion start!
 }
 
-static void ms5611_get_up(baroDev_t *baro)
+static void ms56xx_get_up(baroDev_t *baro)
 {
-    ms5611_up = ms5611_read_adc(&baro->busdev);
+    ms56xx_up = ms56xx_read_adc(&baro->busdev);
 }
 
 STATIC_UNIT_TESTED void ms5611_calculate(int32_t *pressure, int32_t *temperature)
@@ -223,10 +231,10 @@ STATIC_UNIT_TESTED void ms5611_calculate(int32_t *pressure, int32_t *temperature
     uint32_t press;
     int64_t temp;
     int64_t delt;
-    int64_t dT = (int64_t)ms5611_ut - ((uint64_t)ms5611_c[5] * 256);
-    int64_t off = ((int64_t)ms5611_c[2] << 16) + (((int64_t)ms5611_c[4] * dT) >> 7);
-    int64_t sens = ((int64_t)ms5611_c[1] << 15) + (((int64_t)ms5611_c[3] * dT) >> 8);
-    temp = 2000 + ((dT * (int64_t)ms5611_c[6]) >> 23);
+    int64_t dT = (int64_t)ms56xx_ut - ((uint64_t)ms56xx_c[5] * 256);
+    int64_t off = ((int64_t)ms56xx_c[2] << 16) + (((int64_t)ms56xx_c[4] * dT) >> 7);
+    int64_t sens = ((int64_t)ms56xx_c[1] << 15) + (((int64_t)ms56xx_c[3] * dT) >> 8);
+    temp = 2000 + ((dT * (int64_t)ms56xx_c[6]) >> 23);
 
     if (temp < 2000) { // temperature lower than 20degC
         delt = temp - 2000;
@@ -239,9 +247,9 @@ STATIC_UNIT_TESTED void ms5611_calculate(int32_t *pressure, int32_t *temperature
             off -= 7 * delt;
             sens -= (11 * delt) >> 1;
         }
-    temp -= ((dT * dT) >> 31);
+        temp -= ((dT * dT) >> 31);
     }
-    press = ((((int64_t)ms5611_up * sens) >> 21) - off) >> 15;
+    press = ((((int64_t)ms56xx_up * sens) >> 21) - off) >> 15;
 
 
     if (pressure)
@@ -249,4 +257,35 @@ STATIC_UNIT_TESTED void ms5611_calculate(int32_t *pressure, int32_t *temperature
     if (temperature)
         *temperature = temp;
 }
+
+STATIC_UNIT_TESTED void ms5607_calculate(int32_t *pressure, int32_t *temperature)
+{
+    uint32_t press;
+    int64_t temp;
+    int64_t delt;
+    int64_t dT = (int64_t)ms56xx_ut - ((uint64_t)ms56xx_c[5] << 8);
+    int64_t off = ((int64_t)ms56xx_c[2] << 17) + (((int64_t)ms56xx_c[4] * dT) >> 6);
+    int64_t sens = ((int64_t)ms56xx_c[1] << 16) + (((int64_t)ms56xx_c[3] * dT) >> 7);
+    temp = 2000 + ((dT * (int64_t)ms56xx_c[6]) >> 23);
+
+    if (temp < 2000) { // temperature lower than 20degC
+        delt = temp - 2000;
+        delt = delt * delt;
+        off -= (61 * delt) >> 4;
+        sens -= 2 * delt;
+        if (temp < -1500) { // temperature lower than -15degC
+            delt = temp + 1500;
+            delt = delt * delt;
+            off -= 15 * delt;
+            sens -= 8 * delt;
+        }
+        temp -= ((dT * dT) >> 31);
+    }
+    press = ((((int64_t)ms56xx_up * sens) >> 21) - off) >> 15;
+
+    if (pressure)
+        *pressure = press;
+    if (temperature)
+        *temperature = temp;
+ }
 #endif

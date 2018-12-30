@@ -17,5 +17,5 @@ TARGET_SRC += \
             drivers/max7456.c
 else
 TARGET_SRC += \
-            drivers/barometer/barometer_ms5611.c
+            drivers/barometer/barometer_mx56xx.c
 endif
